@@ -2,9 +2,10 @@ import socket
 import threading
 import json
 import random
+import os
 
 HOST = "0.0.0.0"
-PORT = 5555
+PORT = int(os.environ.get("PORT", 10000))
 
 PLAYER_PALETTES = [
     (0, 240, 255),    # Cyan
