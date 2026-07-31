@@ -1,327 +1,581 @@
-import pygame
-import sys
-import random
-import math
-import socket
 import json
+import math
+import random
+import socket
+import sys
 import threading
-from weather import fetch_weather_data, get_city_current_time
+import pygame
 
+import weather
+
+# Screen Window Dimensions
 SCREEN_WIDTH = 1100
 SCREEN_HEIGHT = 650
-WORLD_WIDTH = 3200
-WORLD_HEIGHT = 1200
 
+# Map World Dimensions (Camera scrolls within this larger world)
+WORLD_WIDTH = 2400
+WORLD_HEIGHT = 1400
+
+# Base UI Colors
 CYAN = (0, 240, 255)
 GOLD = (255, 215, 0)
-RED = (255, 60, 60)
 GREEN = (40, 230, 110)
+RED = (255, 60, 60)
 WHITE = (255, 255, 255)
 GREY = (140, 150, 170)
+DARK_PANEL = (15, 20, 32)
+
+# --- CITY THEME COLOR PALETTES ---
+CITY_THEMES = {
+    "SYLHET": {
+        "sky_day": (30, 80, 60),
+        "sky_night": (10, 30, 25),
+        "ground": (34, 110, 56),
+        "building": (40, 65, 50),
+        "roof": (60, 100, 75),
+        "window": (255, 220, 120),
+    },
+    "DHAKA": {
+        "sky_day": (40, 85, 70),
+        "sky_night": (12, 32, 28),
+        "ground": (45, 120, 65),
+        "building": (50, 70, 60),
+        "roof": (75, 110, 85),
+        "window": (255, 230, 130),
+    },
+    "TOKYO": {
+        "sky_day": (25, 25, 55),
+        "sky_night": (12, 10, 30),
+        "ground": (40, 30, 70),
+        "building": (25, 20, 45),
+        "roof": (255, 0, 128),
+        "window": (0, 240, 255),
+    },
+    "DUBAI": {
+        "sky_day": (120, 85, 45),
+        "sky_night": (35, 20, 15),
+        "ground": (190, 140, 70),
+        "building": (75, 55, 35),
+        "roof": (210, 170, 90),
+        "window": (255, 240, 180),
+    },
+    "LONDON": {
+        "sky_day": (70, 80, 90),
+        "sky_night": (20, 25, 32),
+        "ground": (50, 65, 60),
+        "building": (55, 60, 68),
+        "roof": (85, 95, 105),
+        "window": (240, 210, 130),
+    },
+    "MOSCOW": {
+        "sky_day": (60, 75, 95),
+        "sky_night": (18, 24, 38),
+        "ground": (180, 200, 215),
+        "building": (45, 55, 75),
+        "roof": (120, 145, 175),
+        "window": (170, 220, 255),
+    },
+    "NEW YORK": {
+        "sky_day": (85, 60, 95),
+        "sky_night": (18, 15, 32),
+        "ground": (60, 60, 70),
+        "building": (50, 45, 60),
+        "roof": (130, 80, 120),
+        "window": (255, 200, 100),
+    },
+}
+
+DEFAULT_THEME = {
+    "sky_day": (35, 50, 75),
+    "sky_night": (12, 18, 30),
+    "ground": (45, 70, 50),
+    "building": (45, 52, 70),
+    "roof": (70, 80, 105),
+    "window": (255, 230, 120),
+}
 
 
-def get_sky_colors(hour):
-    if 6 <= hour < 17:
-        return (100, 180, 255), (200, 230, 255), (70, 130, 180)
-    elif 17 <= hour < 20:
-        return (255, 90, 60), (255, 180, 100), (120, 60, 90)
-    else:
-        return (10, 14, 26), (22, 30, 50), (25, 32, 48)
+def get_city_theme(city_name):
+  return CITY_THEMES.get(city_name.upper().strip(), DEFAULT_THEME)
 
 
-class WeatherSystem:
-    def __init__(self):
-        self.particles = []
-        for _ in range(120):
-            self.particles.append({
-                "x": random.randint(0, SCREEN_WIDTH),
-                "y": random.randint(0, SCREEN_HEIGHT),
-                "speed": random.uniform(8, 15),
-                "size": random.randint(2, 4)
-            })
+class Camera:
+  """Mini Militia style camera tracking player across large world."""
 
-    def update_and_draw(self, surface, condition):
-        if "rain" in condition or "thunder" in condition:
-            for p in self.particles:
-                p["y"] += p["speed"]
-                p["x"] -= 2
-                if p["y"] > SCREEN_HEIGHT:
-                    p["y"] = -10
-                    p["x"] = random.randint(0, SCREEN_WIDTH)
-                pygame.draw.line(surface, (180, 210, 255), (p["x"], p["y"]), (p["x"] - 2, p["y"] + 12), 2)
+  def __init__(self, width, height):
+    self.camera = pygame.Rect(0, 0, width, height)
+    self.width = width
+    self.height = height
 
-        elif "snow" in condition:
-            for p in self.particles:
-                p["y"] += p["speed"] * 0.25
-                p["x"] += math.sin(p["y"] * 0.05)
-                if p["y"] > SCREEN_HEIGHT:
-                    p["y"] = -10
-                    p["x"] = random.randint(0, SCREEN_WIDTH)
-                pygame.draw.circle(surface, WHITE, (int(p["x"]), int(p["y"])), p["size"])
+  def apply(self, rect):
+    return rect.move(self.camera.topleft)
+
+  def apply_pos(self, x, y):
+    return x + self.camera.x, y + self.camera.y
+
+  def update(self, target_rect):
+    x = -target_rect.centerx + int(SCREEN_WIDTH / 2)
+    y = -target_rect.centery + int(SCREEN_HEIGHT / 2)
+
+    x = min(0, max(-(self.width - SCREEN_WIDTH), x))
+    y = min(0, max(-(self.height - SCREEN_HEIGHT), y))
+    self.camera = pygame.Rect(x, y, self.width, self.height)
 
 
-def run_multiplayer_game(city_name, player_name, server_ip, game_mode, api_key):
-    pygame.init()
-    pygame.font.init()
-    screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-    pygame.display.set_caption(f"WEATHER-PIXEL GAME - [{city_name.upper()}]")
-    clock = pygame.time.Clock()
+class Building:
 
-    font_hud = pygame.font.SysFont("Impact", 16)
-    font_bold = pygame.font.SysFont("Impact", 22)
-    font_victory = pygame.font.SysFont("Impact", 58)
-    font_sub = pygame.font.SysFont("Consolas", 18, bold=True)
+  def __init__(self, x, y, width, height, is_ground=False):
+    self.rect = pygame.Rect(x, y, width, height)
+    self.is_ground = is_ground
 
-    weather_data = fetch_weather_data(city_name, api_key)
-    tz_offset = weather_data.get("timezone_offset", 0)
-    weather_system = WeatherSystem()
+  def draw(self, screen, camera, theme):
+    cam_rect = camera.apply(self.rect)
+    b_color = theme["ground"] if self.is_ground else theme["building"]
+    r_color = theme["roof"]
 
-    # Character Physics
-    px, py = random.randint(300, 1000), 700.0
-    vel_x, vel_y = 0.0, 0.0
-    fuel = 100.0
-    hp = 100
-    score = 0
-    facing_right = True
+    pygame.draw.rect(screen, b_color, cam_rect)
+    pygame.draw.rect(screen, r_color, cam_rect, width=3)
 
-    # 20 Coins Pool Setup
-    active_coins = [
-        {"id": i, "x": random.randint(300, 2900), "y": random.choice([920, 800, 680, 540])}
-        for i in range(20)
-    ]
+    if not self.is_ground:
+      for wx in range(self.rect.x + 12, self.rect.right - 12, 25):
+        for wy in range(self.rect.y + 15, self.rect.bottom - 15, 30):
+          win_rect = camera.apply(pygame.Rect(wx, wy, 12, 16))
+          pygame.draw.rect(screen, theme["window"], win_rect)
 
-    my_color = (0, 240, 255)
 
-    # 3-Minute Match Countdown
-    MATCH_DURATION = 180
-    start_ticks = pygame.time.get_ticks()
-    match_over = False
-    winner_name = ""
+class Coin:
 
-    ground_y = WORLD_HEIGHT - 80
-    platforms = [
-        pygame.Rect(300, 950, 400, 22),
-        pygame.Rect(850, 820, 450, 22),
-        pygame.Rect(1450, 700, 400, 22),
-        pygame.Rect(2000, 850, 450, 22)
-    ]
+  def __init__(self, x, y):
+    self.x = x
+    self.y = y
+    self.radius = 8
+    self.pulse = random.uniform(0, 6)
 
-    btn_back = pygame.Rect(20, 20, 100, 36)
-    btn_lobby = pygame.Rect(SCREEN_WIDTH // 2 - 180, 480, 360, 55)
+  def draw(self, screen, camera):
+    self.pulse += 0.1
+    r = self.radius + int(math.sin(self.pulse) * 2)
+    cx, cy = camera.apply_pos(self.x, self.y)
+    pygame.draw.circle(screen, GOLD, (cx, cy), r)
+    pygame.draw.circle(screen, (255, 255, 180), (cx, cy), max(2, r - 3))
 
-    other_players = {}
-    net_connected = False
-    collected_id = None
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    
+  def get_rect(self):
+    return pygame.Rect(
+        self.x - self.radius,
+        self.y - self.radius,
+        self.radius * 2,
+        self.radius * 2,
+    )
+
+
+class NetworkClient:
+
+  def __init__(self, host, port):
+    self.host = host
+    self.port = port
+    self.socket = None
+    self.connected = False
+    self.player_id = None
+    self.other_players = {}
+
+  def connect(self):
     try:
-        sock.connect((server_ip, 5555))
-        init_data = json.loads(sock.recv(1024).decode())
-        my_id = init_data["id"]
-        my_color = tuple(init_data["color"])
-        net_connected = True
-    except:
-        my_id = random.randint(1, 999)
+      self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+      self.socket.settimeout(3.0)
+      self.socket.connect((self.host, self.port))
+      self.socket.settimeout(None)
+      self.connected = True
+      threading.Thread(target=self.receive_data, daemon=True).start()
+      return True
+    except Exception:
+      self.connected = False
+      return False
 
-    def network_loop():
-        nonlocal other_players, active_coins, collected_id
-        while net_connected and not match_over:
-            try:
-                p_payload = json.dumps({
-                    "x": px, "y": py, "name": player_name,
-                    "facing_right": facing_right, "hp": hp, "score": score,
-                    "collected_coin_id": collected_id
-                })
-                collected_id = None
-                sock.send(p_payload.encode())
-                
-                reply = sock.recv(2048).decode()
-                if reply:
-                    server_state = json.loads(reply)
-                    p_dict = server_state.get("players", {})
-                    other_players = {int(k): v for k, v in p_dict.items() if int(k) != my_id}
-                    
-                    server_coins = server_state.get("coins", [])
-                    if server_coins:
-                        active_coins = server_coins
-            except:
-                break
+  def send(self, data):
+    if self.connected and self.socket:
+      try:
+        msg = json.dumps(data) + "\n"
+        self.socket.sendall(msg.encode("utf-8"))
+      except Exception:
+        self.connected = False
 
-    if net_connected:
-        threading.Thread(target=network_loop, daemon=True).start()
+  def receive_data(self):
+    buffer = ""
+    while self.connected:
+      try:
+        chunk = self.socket.recv(4096).decode("utf-8")
+        if not chunk:
+          break
+        buffer += chunk
+        while "\n" in buffer:
+          line, buffer = buffer.split("\n", 1)
+          if line.strip():
+            msg = json.loads(line)
+            if msg.get("type") == "welcome":
+              self.player_id = msg.get("id")
+            elif msg.get("type") == "state_update":
+              players = msg.get("players", [])
+              self.other_players = {
+                  p["id"]: p for p in players if p["id"] != self.player_id
+              }
+      except Exception:
+        break
+    self.connected = False
 
-    move_left = move_right = move_up = False
-    anim_tick = 0
 
-    running = True
-    while running:
-        clock.tick(60)
-        anim_tick += 1
-        live_time_str, local_hour = get_city_current_time(tz_offset)
+class WeatherParticleSystem:
 
-        # Match Countdown
-        elapsed_seconds = (pygame.time.get_ticks() - start_ticks) // 1000
-        time_remaining = max(0, MATCH_DURATION - elapsed_seconds)
-        time_display = f"{time_remaining // 60:02d}:{time_remaining % 60:02d}"
+  def __init__(self):
+    self.particles = []
 
-        if time_remaining <= 0 and not match_over:
-            match_over = True
-            all_players = [{"name": player_name, "score": score, "hp": hp}]
-            for p in other_players.values():
-                all_players.append({"name": p.get("name", "Player"), "score": p.get("score", 0), "hp": p.get("hp", 100)})
-            all_players.sort(key=lambda x: (x["score"], x["hp"]), reverse=True)
-            winner_name = all_players[0]["name"]
+  def update_and_draw(self, screen, weather_condition):
+    cond = str(weather_condition).lower()
 
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                return
-            elif event.type == pygame.MOUSEBUTTONDOWN:
-                if btn_back.collidepoint(event.pos) and not match_over:
-                    return
-                elif match_over and btn_lobby.collidepoint(event.pos):
-                    return
+    if "rain" in cond or "drizzle" in cond or "thunderstorm" in cond:
+      if len(self.particles) < 120:
+        self.particles.append([
+            random.randint(0, SCREEN_WIDTH),
+            random.randint(-20, 0),
+            random.randint(8, 14),
+        ])
+      for p in self.particles:
+        p[1] += p[2]
+        pygame.draw.line(
+            screen, (150, 200, 255), (p[0], p[1]), (p[0] - 2, p[1] + 10), 2
+        )
+        if p[1] > SCREEN_HEIGHT:
+          p[1] = random.randint(-20, 0)
+          p[0] = random.randint(0, SCREEN_WIDTH)
 
-            elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_ESCAPE:
-                    return
-                if not match_over:
-                    if event.key in (pygame.K_a, pygame.K_LEFT): move_left = True
-                    elif event.key in (pygame.K_d, pygame.K_RIGHT): move_right = True
-                    elif event.key in (pygame.K_w, pygame.K_SPACE, pygame.K_UP): move_up = True
+    elif "snow" in cond:
+      if len(self.particles) < 80:
+        self.particles.append([
+            random.randint(0, SCREEN_WIDTH),
+            random.randint(-20, 0),
+            random.randint(2, 5),
+            random.randint(2, 4),
+        ])
+      for p in self.particles:
+        p[1] += p[2]
+        p[0] += math.sin(p[1] * 0.05)
+        pygame.draw.circle(screen, (255, 255, 255), (int(p[0]), int(p[1])), p[3])
+        if p[1] > SCREEN_HEIGHT:
+          p[1] = random.randint(-20, 0)
+          p[0] = random.randint(0, SCREEN_WIDTH)
 
-            elif event.type == pygame.KEYUP and not match_over:
-                if event.key in (pygame.K_a, pygame.K_LEFT): move_left = False
-                elif event.key in (pygame.K_d, pygame.K_RIGHT): move_right = False
-                elif event.key in (pygame.K_w, pygame.K_SPACE, pygame.K_UP): move_up = False
 
-        # Physics Updates
-        if not match_over:
-            vel_x = 0
-            if move_left: vel_x = -6.0; facing_right = False
-            if move_right: vel_x = 6.0; facing_right = True
+def generate_map():
+  """Generates ground floor and scattered sky buildings."""
+  buildings = [
+      Building(0, WORLD_HEIGHT - 60, WORLD_WIDTH, 60, is_ground=True),
+      Building(200, WORLD_HEIGHT - 350, 180, 290),
+      Building(500, WORLD_HEIGHT - 550, 220, 490),
+      Building(850, WORLD_HEIGHT - 400, 200, 340),
+      Building(1200, WORLD_HEIGHT - 600, 250, 540),
+      Building(1600, WORLD_HEIGHT - 380, 220, 320),
+      Building(1900, WORLD_HEIGHT - 500, 180, 440),
+  ]
 
-            if move_up and fuel > 0:
-                vel_y += -0.85
-                fuel = max(0.0, fuel - 0.5)
-            vel_y += 0.45
-            vel_y = max(-8.0, min(12.0, vel_y))
+  coins = []
+  while len(coins) < 30:
+    cx = random.randint(100, WORLD_WIDTH - 100)
+    cy = random.randint(100, WORLD_HEIGHT - 120)
+    c_rect = pygame.Rect(cx - 10, cy - 10, 20, 20)
+    if not any(b.rect.colliderect(c_rect) for b in buildings):
+      coins.append(Coin(cx, cy))
 
-            px += vel_x
-            py += vel_y
+  return buildings, coins
 
-            px = max(0, min(WORLD_WIDTH - 30, px))
-            py = max(0, min(WORLD_HEIGHT - 46, py))
 
-            player_rect = pygame.Rect(int(px), int(py), 30, 46)
+def draw_pause_menu(screen, font_lg, font_sm, selected_idx):
+  """Renders interactive ESC Pause Menu Overlay."""
+  overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+  overlay.fill((0, 0, 0, 180))  # Semi-transparent backdrop
+  screen.blit(overlay, (0, 0))
 
-            if player_rect.bottom >= ground_y:
-                py = ground_y - 46
-                vel_y = 0
-                fuel = min(100.0, fuel + 0.8)
+  panel_rect = pygame.Rect(
+      SCREEN_WIDTH // 2 - 200, SCREEN_HEIGHT // 2 - 170, 400, 340
+  )
+  pygame.draw.rect(screen, DARK_PANEL, panel_rect, border_radius=12)
+  pygame.draw.rect(screen, CYAN, panel_rect, width=3, border_radius=12)
 
-            for p in platforms:
-                if player_rect.colliderect(p) and vel_y > 0:
-                    if player_rect.bottom - vel_y <= p.top + 12:
-                        py = p.top - 46
-                        vel_y = 0
-                        fuel = min(100.0, fuel + 0.8)
+  title = font_lg.render("GAME PAUSED", True, GOLD)
+  screen.blit(title, (SCREEN_WIDTH // 2 - title.get_width() // 2, panel_rect.y + 25))
 
-            # Check collision against all 20 active coins
-            for coin in active_coins:
-                coin_rect = pygame.Rect(coin["x"], coin["y"], 22, 22)
-                if player_rect.colliderect(coin_rect):
-                    score += 10
-                    collected_id = coin["id"]
-                    if not net_connected:
-                        coin["x"] = random.randint(300, 2900)
-                        coin["y"] = random.choice([920, 800, 680, 540])
-                    break
+  options = [
+      "1. RESUME GAME",
+      "2. TOGGLE FULLSCREEN",
+      "3. QUIT TO MAIN MENU",
+      "4. QUIT TO DESKTOP",
+  ]
 
-        # Camera
-        cam_x = int(px) - SCREEN_WIDTH // 2
-        cam_y = int(py) - SCREEN_HEIGHT // 2
-        cam_x = max(0, min(WORLD_WIDTH - SCREEN_WIDTH, cam_x))
-        cam_y = max(0, min(WORLD_HEIGHT - SCREEN_HEIGHT, cam_y))
+  for i, opt in enumerate(options):
+    col = GREEN if i == selected_idx else WHITE
+    bg_col = (30, 45, 65) if i == selected_idx else (20, 28, 40)
 
-        # Sky Background
-        top_sky, bot_sky, mountain_col = get_sky_colors(local_hour)
-        for y in range(0, SCREEN_HEIGHT, 8):
-            interp = y / SCREEN_HEIGHT
-            r = int(top_sky[0] * (1 - interp) + bot_sky[0] * interp)
-            g = int(top_sky[1] * (1 - interp) + bot_sky[1] * interp)
-            b = int(top_sky[2] * (1 - interp) + bot_sky[2] * interp)
-            pygame.draw.rect(screen, (r, g, b), (0, y, SCREEN_WIDTH, 8))
+    btn_rect = pygame.Rect(panel_rect.x + 30, panel_rect.y + 85 + (i * 55), 340, 42)
+    pygame.draw.rect(screen, bg_col, btn_rect, border_radius=6)
+    pygame.draw.rect(
+        screen, col if i == selected_idx else GREY, btn_rect, width=2, border_radius=6
+    )
 
-        pygame.draw.ellipse(screen, mountain_col, (-100 - int(cam_x * 0.2), SCREEN_HEIGHT - 350, 900, 400))
-        
-        # Terrain
-        pygame.draw.rect(screen, (35, 42, 58), (0 - cam_x, ground_y - cam_y, WORLD_WIDTH, 80))
-        pygame.draw.rect(screen, GREEN, (0 - cam_x, ground_y - cam_y, WORLD_WIDTH, 8))
+    lbl = font_sm.render(opt, True, col)
+    screen.blit(
+        lbl,
+        (
+            btn_rect.x + 20,
+            btn_rect.y + 12,
+        ),
+    )
 
-        for p in platforms:
-            pygame.draw.rect(screen, (60, 70, 90), (p.x - cam_x, p.y - cam_y, p.width, p.height), border_radius=4)
-            pygame.draw.rect(screen, CYAN, (p.x - cam_x, p.y - cam_y, p.width, 3), border_radius=2)
+  hint = font_sm.render("[UP/DOWN/ENTER] Select | [ESC] Resume", True, GREY)
+  screen.blit(hint, (SCREEN_WIDTH // 2 - hint.get_width() // 2, panel_rect.bottom - 25))
 
-        # Render 20 Animated Coins
-        scale = abs(math.sin(anim_tick * 0.1))
-        coin_w = max(3, int(18 * scale))
-        for coin in active_coins:
-            cx = coin["x"] - cam_x
-            cy = coin["y"] - cam_y
-            if -30 <= cx <= SCREEN_WIDTH + 30 and -30 <= cy <= SCREEN_HEIGHT + 30:
-                pygame.draw.ellipse(screen, GOLD, (cx + 11 - coin_w // 2, cy + 2, coin_w, 18))
 
-        # Weather Particles
-        weather_system.update_and_draw(screen, weather_data.get("condition", "clear"))
+def run_multiplayer_game(
+    city_name, player_name, server_host, game_mode, api_key
+):
+  pygame.init()
+  screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+  pygame.display.set_caption(f"MINI MILITIA STYLE ARCADE - [{player_name}]")
+  clock = pygame.time.Clock()
 
-        # Remote Players
-        for p_id, p_data in other_players.items():
-            p_color = tuple(p_data.get("color", RED))
-            pygame.draw.rect(screen, p_color, (int(p_data["x"]) - cam_x, int(p_data["y"]) - cam_y, 30, 46), border_radius=4)
-            p_lbl = font_hud.render(p_data.get("name", "Player"), True, WHITE)
-            screen.blit(p_lbl, (int(p_data["x"]) - cam_x - 5, int(p_data["y"]) - cam_y - 20))
+  # Load Theme Palette for City
+  city_theme = get_city_theme(city_name)
 
-        # Local Player
-        pygame.draw.rect(screen, my_color, (int(px) - cam_x, int(py) - cam_y, 30, 46), border_radius=4)
-        me_lbl = font_hud.render(f"YOU ({player_name})", True, GOLD)
-        screen.blit(me_lbl, (int(px) - cam_x - 15, int(py) - cam_y - 20))
+  # Fetch Live Weather
+  weather_data = weather.fetch_weather_data(city_name, api_key)
+  temp = weather_data.get("temp", "N/A")
+  condition = weather_data.get("condition", "clear")
+  description = weather_data.get("description", "CLEAR SKY").upper()
+  tz_offset = weather_data.get("timezone_offset", 21600)
+  time_str, current_hour = weather.get_city_current_time(tz_offset)
 
-        # HUD Overlay
-        pygame.draw.rect(screen, (20, 26, 40), btn_back, border_radius=6)
-        pygame.draw.rect(screen, CYAN, btn_back, 1, border_radius=6)
-        screen.blit(font_hud.render("◄ BACK", True, WHITE), (btn_back.x + 18, btn_back.y + 8))
+  is_night = current_hour < 6 or current_hour >= 18
+  bg_color = city_theme["sky_night"] if is_night else city_theme["sky_day"]
 
-        hud = pygame.Surface((520, 50), pygame.SRCALPHA)
-        hud.fill((12, 16, 26, 220))
-        screen.blit(hud, (140, 15))
-        pygame.draw.rect(screen, CYAN, (140, 15, 520, 50), 2, border_radius=6)
+  # Network Client
+  host = "sakura.proxy.rlwy.net" if (
+      "rlwy" in server_host or "pixel" in server_host or not server_host
+  ) else server_host
+  net = NetworkClient(host, 44908)
+  is_multiplayer = "MULTIPLAYER" in game_mode.upper() or "CO-OP" in game_mode.upper()
+  if is_multiplayer and net.connect():
+    net.send({"type": "join", "name": player_name})
 
-        screen.blit(font_bold.render(f"📍 {city_name.upper()}  |  🕒 {live_time_str}", True, GOLD), (155, 26))
-        screen.blit(font_bold.render(f"⏱️ TIME: {time_display}", True, RED if time_remaining < 30 else GREEN), (410, 26))
-        screen.blit(font_bold.render(f"🪙 COIN: {score}", True, GOLD), (550, 26))
+  # Camera & World Setup
+  camera = Camera(WORLD_WIDTH, WORLD_HEIGHT)
+  buildings, coins = generate_map()
 
-        # Victory Screen
-        if match_over:
-            overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
-            overlay.fill((10, 14, 24, 210))
-            screen.blit(overlay, (0, 0))
+  # Player Physics
+  player_rect = pygame.Rect(100, WORLD_HEIGHT - 200, 28, 36)
+  vel_x, vel_y = 0, 0
+  gravity = 0.5
+  jetpack_thrust = -0.9
+  move_speed = 6
+  jetpack_fuel = 100.0
+  score = 0
+  on_ground = False
 
-            card = pygame.Rect(SCREEN_WIDTH // 2 - 300, 120, 600, 420)
-            pygame.draw.rect(screen, (20, 26, 40), card, border_radius=12)
-            pygame.draw.rect(screen, GOLD, card, 3, border_radius=12)
+  # Pause State
+  is_paused = False
+  pause_selected = 0
+  is_fullscreen = False
 
-            t_vic = font_victory.render("MATCH FINISHED!", True, GOLD)
-            screen.blit(t_vic, (card.centerx - t_vic.get_width() // 2, card.y + 30))
+  font_lg = pygame.font.SysFont("Consolas", 18, bold=True)
+  font_sm = pygame.font.SysFont("Consolas", 14, bold=True)
+  particle_sys = WeatherParticleSystem()
 
-            is_me = (winner_name == player_name)
-            sub = f"🎉 YOU WIN! 🎉" if is_me else f"🏆 WINNER: {winner_name.upper()}"
-            t_sub = font_bold.render(sub, True, GREEN if is_me else CYAN)
-            screen.blit(t_sub, (card.centerx - t_sub.get_width() // 2, card.y + 120))
+  running = True
+  while running:
+    clock.tick(60)
 
-            screen.blit(font_sub.render(f"YOUR SCORE: {score} COINS", True, WHITE), (card.centerx - 110, card.y + 190))
+    for event in pygame.event.get():
+      if event.type == pygame.QUIT:
+        running = False
 
-            pygame.draw.rect(screen, GREEN, btn_lobby, border_radius=8)
-            t_btn = font_bold.render("RETURN TO DASHBOARD ▶", True, (10, 25, 15))
-            screen.blit(t_btn, (btn_lobby.centerx - t_btn.get_width() // 2, btn_lobby.centery - t_btn.get_height() // 2))
+      elif event.type == pygame.KEYDOWN:
+        if event.key == pygame.K_ESCAPE:
+          is_paused = not is_paused
 
-        pygame.display.flip()
+        if is_paused:
+          if event.key == pygame.K_UP:
+            pause_selected = (pause_selected - 1) % 4
+          elif event.key == pygame.K_DOWN:
+            pause_selected = (pause_selected + 1) % 4
+          elif event.key == pygame.K_RETURN:
+            if pause_selected == 0:  # Resume
+              is_paused = False
+            elif pause_selected == 1:  # Fullscreen Toggle
+              is_fullscreen = not is_fullscreen
+              screen = (
+                  pygame.display.set_mode(
+                      (SCREEN_WIDTH, SCREEN_HEIGHT), pygame.FULLSCREEN
+                  )
+                  if is_fullscreen
+                  else pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+              )
+            elif pause_selected == 2:  # Main Menu
+              running = False
+            elif pause_selected == 3:  # Quit Desktop
+              if net.socket:
+                net.socket.close()
+              pygame.quit()
+              sys.exit()
+
+    if not is_paused:
+      keys = pygame.key.get_pressed()
+
+      # Horizontal Movement
+      vel_x = 0
+      if keys[pygame.K_LEFT] or keys[pygame.K_a]:
+        vel_x = -move_speed
+      if keys[pygame.K_RIGHT] or keys[pygame.K_d]:
+        vel_x = move_speed
+
+      # Jetpack & Gravity
+      if (
+          keys[pygame.K_UP] or keys[pygame.K_w] or keys[pygame.K_SPACE]
+      ) and jetpack_fuel > 0:
+        vel_y += jetpack_thrust
+        jetpack_fuel = max(0, jetpack_fuel - 0.8)
+      else:
+        vel_y += gravity
+        if on_ground:
+          jetpack_fuel = min(100.0, jetpack_fuel + 0.5)
+
+      vel_y = min(12, vel_y)
+
+      # Collisions X
+      player_rect.x += int(vel_x)
+      for b in buildings:
+        if player_rect.colliderect(b.rect):
+          if vel_x > 0:
+            player_rect.right = b.rect.left
+          elif vel_x < 0:
+            player_rect.left = b.rect.right
+
+      # Collisions Y
+      player_rect.y += int(vel_y)
+      on_ground = False
+      for b in buildings:
+        if player_rect.colliderect(b.rect):
+          if vel_y > 0:
+            player_rect.bottom = b.rect.top
+            vel_y = 0
+            on_ground = True
+          elif vel_y < 0:
+            player_rect.top = b.rect.bottom
+            vel_y = 0
+
+      player_rect.x = max(
+          0, min(WORLD_WIDTH - player_rect.width, player_rect.x)
+      )
+      player_rect.y = max(
+          0, min(WORLD_HEIGHT - player_rect.height, player_rect.y)
+      )
+
+      camera.update(player_rect)
+
+      if net.connected:
+        net.send(
+            {"type": "update", "x": player_rect.centerx, "y": player_rect.centery}
+        )
+
+      for coin in coins[:]:
+        if player_rect.colliderect(coin.get_rect()):
+          coins.remove(coin)
+          score += 1
+
+    # --- RENDER GAME ---
+    screen.fill(bg_color)
+
+    # Render City Objects with Custom Theme
+    for building in buildings:
+      building.draw(screen, camera, city_theme)
+
+    for coin in coins:
+      coin.draw(screen, camera)
+
+    particle_sys.update_and_draw(screen, condition)
+
+    # Remote Players
+    for p_id, p_data in net.other_players.items():
+      rx, ry = p_data.get("x", 0), p_data.get("y", 0)
+      rname = p_data.get("name", "Player")
+      cam_rx, cam_ry = camera.apply_pos(rx - 14, ry - 18)
+      pygame.draw.rect(screen, RED, (cam_rx, cam_ry, 28, 36), border_radius=4)
+      label = font_sm.render(rname, True, WHITE)
+      screen.blit(label, (cam_rx - label.get_width() // 2 + 14, cam_ry - 20))
+
+    # Local Player
+    cam_px, cam_py = camera.apply_pos(player_rect.x, player_rect.y)
+    pygame.draw.rect(
+        screen, GREEN, (cam_px, cam_py, player_rect.width, player_rect.height), border_radius=4
+    )
+    p_label = font_sm.render(f"{player_name} (YOU)", True, GOLD)
+    screen.blit(
+        p_label, (cam_px - p_label.get_width() // 2 + 14, cam_py - 20)
+    )
+
+    # Jetpack Flame
+    keys = pygame.key.get_pressed()
+    if (
+        not is_paused
+        and (keys[pygame.K_UP] or keys[pygame.K_w] or keys[pygame.K_SPACE])
+        and jetpack_fuel > 0
+    ):
+      pygame.draw.polygon(
+          screen,
+          GOLD,
+          [
+              (cam_px + 6, cam_py + player_rect.height),
+              (cam_px + 22, cam_py + player_rect.height),
+              (cam_px + 14, cam_py + player_rect.height + 12),
+          ],
+      )
+
+    # --- TOP HUD ---
+    pygame.draw.rect(screen, (10, 12, 20), (0, 0, SCREEN_WIDTH, 70))
+    pygame.draw.line(screen, CYAN, (0, 70), (SCREEN_WIDTH, 70), 2)
+
+    screen.blit(font_lg.render(f"MODE: {game_mode}", True, WHITE), (20, 12))
+    status_txt = "ONLINE" if net.connected else "OFFLINE"
+    status_col = GREEN if net.connected else GREY
+    screen.blit(
+        font_sm.render(f"SERVER: {status_txt}", True, status_col), (20, 38)
+    )
+
+    screen.blit(
+        font_lg.render(f"THEME: {city_name.upper()}", True, GOLD), (250, 12)
+    )
+    screen.blit(
+        font_sm.render(
+            f"{description} | {temp}°C | TIME: {time_str}", True, CYAN
+        ),
+        (250, 38),
+    )
+
+    screen.blit(font_sm.render("JETPACK FUEL", True, WHITE), (700, 15))
+    pygame.draw.rect(screen, GREY, (700, 36, 140, 16), width=2)
+    pygame.draw.rect(
+        screen,
+        CYAN if jetpack_fuel > 20 else RED,
+        (702, 38, int(1.36 * jetpack_fuel), 12),
+    )
+
+    screen.blit(font_lg.render(f"COINS: {score}", True, GOLD), (940, 20))
+
+    # Pause Overlay Menu
+    if is_paused:
+      draw_pause_menu(screen, font_lg, font_sm, pause_selected)
+
+    pygame.display.flip()
+
+  if net.socket:
+    net.socket.close()
+
+
+if __name__ == "__main__":
+  run_multiplayer_game(
+      "Sylhet", "Soldier1", "sakura.proxy.rlwy.net", "SOLO_20", ""
+  )
